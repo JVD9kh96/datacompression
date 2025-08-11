@@ -1,3 +1,5 @@
+import os
+os.environ['TF_USE_LEGACY_KERAS'] = "1"
 import tensorflow as tf
 import numpy as np
 from objectdetection.utils import fixed_padding
@@ -8,7 +10,7 @@ _LEAKY_RELU = 0.1
 _ANCHORS = [(10, 13), (16, 30), (33, 23),
             (30, 61), (62, 45), (59, 119),
             (116, 90), (156, 198), (373, 326)]
-_MODEL_SIZE = (416, 416)
+_MODEL_SIZE = (None, None)
 
 _MINIMAL_YOLO_CHECKPOINT_DIR = "objectdetection/ckeckpoints/minial_yolo.weights.h5"
 _YOLO_CHECKPOINT_DIR = "objectdetection/ckeckpoints/yolo.weights.h5"
@@ -16,7 +18,7 @@ _BNPLUSLRELU_CHECKPOINT_DIR = "objectdetection/ckeckpoints/V13.weights.h5"
 
 
 class YoloV3(tf.keras.Model):
-    def __init__(self, n_classes=80, model_size=(416, 416),
+    def __init__(self, n_classes=80, model_size=(None, None),
                  max_output_size=10, iou_threshold=0.5,
                  confidence_threshold=0.5, data_format=None, name='yolo_v3_model'):
         super().__init__(name=name)
@@ -406,7 +408,7 @@ class MinimalYoloV3(tf.keras.Model):
     Minimal implementation of the YOLO network. This network aims to output 
     the output of 13th conv layer in the backbone, required for training stage. 
     """
-    def __init__(self,  model_size=(416, 416), data_format=None, name='minimal_yolo_v3_model'):
+    def __init__(self,  model_size=(None, None), data_format=None, name='minimal_yolo_v3_model'):
         super().__init__(name=name)
         if not data_format:
             data_format = 'channels_first' if tf.test.is_built_with_cuda() else 'channels_last'
