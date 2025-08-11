@@ -4,6 +4,11 @@ import math
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers
+try:
+    import tensorflow_compression as tfc
+    TF_COMPRESSION_AVAILABLE = True
+except Exception:
+    TF_COMPRESSION_AVAILABLE = False
 
 # -----------------------------------------------------------
 # Basic blocks: ResidualBlock, ResidualBlockUpsample
@@ -20,21 +25,87 @@ class ResidualBlock(layers.Layer):
         y = self.conv2(y)
         return x + y
 
-class ResidualBlockUpsample(layers.Layer):
-    def __init__(self, filters, up=2, kernel_size=3, activation=tf.nn.leaky_relu):
+
+
+# fallback simple (approximate) IGDN if tfc not available (not ideal)
+class _FallbackInverseGDN(layers.Layer):
+    def __init__(self, eps=1e-6):
         super().__init__()
-        self.up = layers.UpSampling2D(size=(up, up), interpolation='nearest')
-        self.conv1 = layers.Conv2D(filters, kernel_size, padding='same', use_bias=True)
-        self.act = activation
-        self.conv2 = layers.Conv2D(filters, kernel_size, padding='same', use_bias=True)
-        self.conv_skip = layers.Conv2D(filters, 1, padding='same', use_bias=True)
+        self.eps = eps
+        self.built = False
+    def build(self, input_shape):
+        ch = int(input_shape[-1])
+        # simple per-channel params for fallback
+        self.beta = self.add_weight('beta', shape=(ch,), initializer=tf.keras.initializers.Constant(1.0), trainable=True)
+        self.gamma = self.add_weight('gamma', shape=(ch,), initializer=tf.keras.initializers.Zeros(), trainable=True)
+        self.built = True
     def call(self, x):
-        s = self.up(x)
-        skip = self.conv_skip(s)
+        # diagonal approximate IGDN: x * sqrt(beta + gamma * x^2)
+        # Note: this is a crude diagonal simplification of the full GDN matrix form.
+        sq = tf.square(x)
+        # broadcast channel params over spatial dims
+        val = tf.sqrt(tf.nn.relu(self.beta + self.gamma * sq) + self.eps)
+        return x * val
+
+class ResidualBlockUpsample(layers.Layer):
+    """
+    RB with upsample as in the paper:
+      main branch: upsample -> Conv(3) -> LeakyReLU -> Conv(3) -> IGDN
+      skip branch:  upsample -> Conv(3)
+      output = skip + main_branch_out
+    """
+    def __init__(self, filters, up=2, kernel_size=3, activation=tf.nn.leaky_relu, use_bias=True, name=None):
+        super().__init__(name=name)
+        self.up_factor = up
+        self.filters = filters
+        self.kernel_size = kernel_size
+        self.activation = activation
+        self.use_bias = use_bias
+
+        # Up-sampling layer (nearest as in earlier code)
+        self.upsample = layers.UpSampling2D(size=(up, up), interpolation='nearest')
+
+        # main path convs
+        self.conv1 = layers.Conv2D(filters, kernel_size, padding='same', use_bias=use_bias)
+        self.conv2 = layers.Conv2D(filters, kernel_size, padding='same', use_bias=use_bias)
+
+        # skip conv (paper shows Conv(3) on skip)
+        self.conv_skip = layers.Conv2D(filters, kernel_size, padding='same', use_bias=use_bias)
+
+        # activation (LeakyReLU)
+        self.act = layers.Activation(self.activation)
+
+        # IGDN layer (use tfc if available, else fallback)
+        if TF_COMPRESSION_AVAILABLE:
+            # tensorflow_compression exposes a GDN layer. Use inverse=True for IGDN
+            try:
+                self.igdn = tfc.layers.GDN(inverse=True)   # TF compression API
+            except Exception:
+                # Older tfc API sometimes had tfc.GDN(..., inverse=True)
+                try:
+                    self.igdn = tfc.GDN(inverse=True)
+                except Exception:
+                    # fallback to our approximate IGDN
+                    self.igdn = _FallbackInverseGDN()
+        else:
+            self.igdn = _FallbackInverseGDN()
+
+    def call(self, x):
+        # upsample input once
+        s = self.upsample(x)                 # spatially upsampled input
+
+        # main branch
         y = self.conv1(s)
         y = self.act(y)
         y = self.conv2(y)
+        y = self.igdn(y)                     # inverse GDN applied here
+
+        # skip branch
+        skip = self.conv_skip(s)
+
+        # residual add
         return skip + y
+
 
 # -----------------------------------------------------------
 # MaskedConv2D for CTXm (mask 'A' for causal raster-scan)
