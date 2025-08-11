@@ -101,7 +101,7 @@ def preprocess_train_image(image, patch_size=256, seed=None, augment=True):
 # -------------------------
 # CLIC (TFDS) pipeline
 # -------------------------
-def make_clic_train_dataset(batch_size=16, patch_size=256, shuffle_buffer=8192, cache=False, seed=None, as_supervised=False):
+def make_clic_train_dataset(batch_size=16, patch_size=256, shuffle_buffer=256, cache=False, seed=None, as_supervised=False):
     """
     Stage 1 dataset from TFDS 'clic' train split.
     - Random 256x256 crops as in paper
@@ -195,7 +195,7 @@ def build_vimeo_image_list_from_sep(base_dir, sep_trainlist_path, sequence_dir_n
     random.shuffle(img_paths)
     return img_paths
 
-def make_vimeo_train_dataset_from_filelist(img_file_list, batch_size=16, patch_size=256, shuffle_buffer=10000, augment=True, seed=None):
+def make_vimeo_train_dataset_from_filelist(img_file_list, batch_size=16, patch_size=256, shuffle_buffer=256, augment=True, seed=None):
     """
     Create tf.data.Dataset from a list of image file paths (python list).
     Each element is loaded and randomly cropped to patch_size (256) and batched.
