@@ -10,26 +10,56 @@ AUTOTUNE = tf.data.AUTOTUNE
 # -------------------------
 # Helpers
 # -------------------------
-def decode_and_convert(contents, channels=3):
-    # decode image bytes and convert to float32 [0,1]
+def decode_and_convert(contents, channels=0):
+    """
+    Decode bytes -> float32 [0,1]. Use channels=0 to preserve whatever channels are present,
+    we'll normalize afterwards in ensure_3_channels().
+    """
+    # decode_image returns a rank-3 tensor [H,W,C] (C may be 1,3,4,...)
     img = tf.image.decode_image(contents, channels=channels, expand_animations=False)
-    img = tf.image.convert_image_dtype(img, tf.float32)  # [0,1]
+    # decode_image can return uint8; convert to float32 in [0,1]
+    img = tf.image.convert_image_dtype(img, tf.float32)
     return img
+
+
+def ensure_3_channels(image):
+    """
+    Robustly ensure image has 3 channels (RGB), returns float32 tensor [H,W,3].
+    Rules:
+      - If channels == 1: convert grayscale -> RGB (tile)
+      - If channels >= 3: take first 3 channels (drop alpha/extra channels)
+    This avoids the tf.cond branch-shape mismatch you saw.
+    """
+    image = tf.convert_to_tensor(image)
+    # Ensure rank is 3 (H,W,C). If not, try to expand dims or raise.
+    rank = tf.rank(image)
+    # If image somehow has no channel dim (rank==2), add channel dim.
+    def _expand_if_needed():
+        return tf.cond(
+            tf.equal(rank, 2),
+            lambda: tf.expand_dims(image, axis=-1),
+            lambda: image,
+        )
+    image = _expand_if_needed()
+
+    c = tf.shape(image)[-1]
+
+    def gray_to_rgb():
+        # grayscale_to_rgb expects shape [...,1] and returns [...,3]
+        return tf.image.grayscale_to_rgb(image)
+
+    def take_first3():
+        # If image already has >=3 channels, slice to first 3 channels.
+        return image[..., :3]
+
+    # If c == 1 -> convert; else (c >= 2) take first 3 channels (works also when c==3).
+    return tf.cond(tf.equal(c, 1), gray_to_rgb, take_first3)
+
 
 def load_image_file(path):
     contents = tf.io.read_file(path)
     return decode_and_convert(contents, channels=3)  # request 3 channels; if grayscale, decoder will expand
 
-def ensure_3_channels(image):
-    """
-    Some datasets may contain grayscale images. Ensure output has 3 channels.
-    image: tf.Tensor [H,W,C] where C may be 1 or 3
-    """
-    c = tf.shape(image)[-1]
-    # if c == 1 convert; else return
-    return tf.cond(tf.equal(c, 1),
-                   lambda: tf.image.grayscale_to_rgb(image),
-                   lambda: image)
 
 def random_crop_or_pad_to_size(image, target_h, target_w):
     """
