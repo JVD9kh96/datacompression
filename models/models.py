@@ -13,10 +13,10 @@ except Exception:
     _HAS_TFC = False
     raise RuntimeError("Please install tensorflow-compression (tfc). E.g. pip install tensorflow-compression")
 
-from model.layers import ResidualBlock, ResidualBlockUpsample,\
+from models.layers import ResidualBlock, ResidualBlockUpsample,\
                          MaskedConv2D, EntropyParameter
 
-from model.utils import add_uniform_noise, ste_round,\
+from models.utils import add_uniform_noise, ste_round,\
                         discrete_gaussian_likelihood,\
                         bits_from_likelihoods
 

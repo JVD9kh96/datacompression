@@ -1,3 +1,3 @@
-from model.models import MultiTaskCodec
+from models.models import MultiTaskCodec
 
 
