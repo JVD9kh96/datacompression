@@ -1,3 +1,2 @@
-from models.models import MultiTaskCodec
-from models.layers import LatentSpaceTransform
+from models.models import MultiTaskCodec, LatentSpaceTransform
 
