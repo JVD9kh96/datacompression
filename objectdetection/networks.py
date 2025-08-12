@@ -527,9 +527,9 @@ class MinimalYoloV3(tf.keras.Model):
         _, cur_shape = self._create_conv_bn_build('d_conv3', 256, 3, strides=2, use_bias=False, input_shape=cur_shape)
         
         _, tmp_shape = self._create_conv_bn_build(f'd_res3_0_conv1', 128, 1, strides=1, use_bias=False, input_shape=cur_shape)
-        _, cur_shape = self._create_conv_bn_build(f'd_res3_1_conv2', 256, 3, strides=1, use_bias=False, input_shape=tmp_shape)
+        _, cur_shape = self._create_conv_bn_build(f'd_res3_0_conv2', 256, 3, strides=1, use_bias=False, input_shape=tmp_shape)
 
-        _, tmp_shape = self._create_conv_bn_build(f'd_res3_2_conv1', 128, 1, strides=1, use_bias=False, input_shape=cur_shape)
+        _, tmp_shape = self._create_conv_bn_build(f'd_res3_1_conv1', 128, 1, strides=1, use_bias=False, input_shape=cur_shape)
         
         route1_shape = cur_shape
 
