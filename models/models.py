@@ -4,7 +4,7 @@ import math
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, Model
-
+from models.layers import _FallbackInverseGDN
 # Try import tensorflow_compression
 try:
     from tensorflow_compression.entropy_models import\
@@ -14,6 +14,18 @@ except Exception:
     _HAS_TFC = False
     from compression import EntropyBottleneck
     # raise RuntimeError("Please install tensorflow-compression (tfc). E.g. pip install tensorflow-compression")
+
+try:
+    import tensorflow_compression as tfc
+    _HAS_TFC = True
+    def make_igdn(name=None):
+        # tfc.GDN supports inverse=True to create IGDN
+        return tfc.GDN(name=name, inverse=True)
+except Exception:
+    _HAS_TFC = False
+    def make_igdn(name=None):
+        return _FallbackInverseGDN()  # use the fallback you provided
+
 
 from models.layers import ResidualBlock, ResidualBlockUpsample,\
                          MaskedConv2D, EntropyParameter
@@ -63,6 +75,92 @@ class SynthesisTransform(Model):
         x = self.up3(x)
         x = self.conv_out(x)
         return x
+
+
+class SynthesisTransform(Model):
+    """
+    Synthesis (decoder) transform matching the TF1 reference (no attention).
+    - Four up-sampling blocks (i = 0..3)
+    - For i < 3:
+        - residual sub-block (two convs + residual)
+        - shortcut: Conv2D(4*F, 1x1) -> depth_to_space(2)
+        - main:       Conv2D(4*F, 3x3) -> depth_to_space(2) -> IGDN(inverse=True)
+        - output = shortcut + main
+    - For i == 3 (final block):
+        - residual sub-block
+        - Conv2D(12, 3x3) -> depth_to_space(2) -> (optional sigmoid) => RGB
+    """
+    def __init__(self, C=192, final_activation=None, name="synthesis_transform"):
+        """
+        num_filters: F in the above description (paper uses F=num_filters)
+        final_activation: None or 'sigmoid' (if you want outputs in [0,1])
+        """
+        super().__init__(name=name)
+        num_filters = C
+        self.F = num_filters
+        self.final_activation = final_activation
+
+        # residual convs for each block: two conv layers per block (like the reference)
+        # We'll create them as lists to keep Keras friendly
+        self.res_conv0 = [layers.Conv2D(self.F, 3, padding='same', use_bias=True, name=f"res{i}_c0")
+                          for i in range(4)]
+        self.res_conv1 = [layers.Conv2D(self.F, 3, padding='same', use_bias=True, name=f"res{i}_c1")
+                          for i in range(4)]
+        # main up-convs and shortcut convs for first 3 blocks
+        self.main_conv_up = [layers.Conv2D(self.F * 4, 3, padding='same', use_bias=True, name=f"main_up_{i}")
+                             for i in range(3)]
+        self.shortcut_conv = [layers.Conv2D(self.F * 4, 1, padding='same', use_bias=True, name=f"sc_{i}")
+                              for i in range(3)]
+
+        # IGDN (inverse) layers for the main path after depth_to_space
+        self.igdn = [make_igdn(name=f"igdn_{i}") for i in range(3)]
+
+        # last conv producing 12 channels (-> depth_to_space -> RGB)
+        self.last_conv_12 = layers.Conv2D(12, 3, padding='same', use_bias=True, name="last_conv_12")
+        # optional final activation
+        if final_activation == 'sigmoid':
+            self.final_act = layers.Activation('sigmoid')
+        else:
+            self.final_act = None
+
+        # small leaky relu activation used inside blocks (to mimic TF1)
+        self.leaky = tf.nn.leaky_relu
+
+    def call(self, y_hat, training=False):
+        """
+        y_hat: [B, Hc, Wc, C] the latent (quantized during inference)
+        returns: reconstructed image tensor [B, H, W, 3]
+        """
+        x = y_hat
+
+        for i in range(4):
+            # residual sub-block: two convs with leaky relu, then skip-add
+            t = self.res_conv0[i](x)
+            t = self.leaky(t)
+            t = self.res_conv1[i](t)
+            x = x + t
+
+            if i < 3:
+                # shortcut path (1x1 conv to 4*F channels then depth_to_space)
+                sc = self.shortcut_conv[i](x)
+                sc = tf.nn.depth_to_space(sc, block_size=2)
+
+                # main path: conv(3x3 -> 4*F) -> depth_to_space -> IGDN(inverse)
+                main = self.main_conv_up[i](x)
+                main = tf.nn.depth_to_space(main, block_size=2)
+                main = self.igdn[i](main)
+
+                x = main + sc
+            else:
+                # final block: conv -> depth_to_space -> rgb
+                main = self.last_conv_12(x)
+                main = tf.nn.depth_to_space(main, block_size=2)
+                x = main
+
+        if self.final_act is not None:
+            x = self.final_act(x)
+        return x
+
 
 # -----------------------------------------------------------
 # Hyper networks: hyper-analysis (h_a) and hyper-synthesis (h_s)
