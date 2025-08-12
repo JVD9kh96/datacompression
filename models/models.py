@@ -13,7 +13,7 @@ try:
 except Exception:
     _HAS_TFC = False
     from compression import EntropyBottleneck
-    raise RuntimeError("Please install tensorflow-compression (tfc). E.g. pip install tensorflow-compression")
+    # raise RuntimeError("Please install tensorflow-compression (tfc). E.g. pip install tensorflow-compression")
 
 from models.layers import ResidualBlock, ResidualBlockUpsample,\
                          MaskedConv2D, EntropyParameter
