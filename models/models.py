@@ -208,7 +208,7 @@ class HyperSynthesis(Model):
 # We'll implement LST with up_factors = [2,1,1,1] with final out_channels=256
 # -----------------------------------------------------------
 class LatentSpaceTransform(Model):
-    def __init__(self, out_channels=256, up_factors=(2,1,1,1)):
+    def __init__(self, out_channels=128, up_factors=(2,1,1,1)):
         super().__init__()
         self.blocks = []
         for up in up_factors:
