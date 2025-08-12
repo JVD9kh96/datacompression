@@ -1,10 +1,11 @@
-import numpy as np
 import os 
 os.environ['TF_USE_LEGACY_KERAS'] = "1"
 import tensorflow as tf
+from tensorflow.keras.layers import Layer
+import numpy as np
 
 
-class EntropyModel(tf.keras.layers.Layer):
+class EntropyModel(Layer):
   """Base class (minimal)"""
 
   def __init__(self, tail_mass=2 ** -8, likelihood_bound=1e-9,
