@@ -1,5 +1,5 @@
-import os
-os.environ['TF_USE_LEGACY_KERAS'] = "1"
+# import os
+# os.environ['TF_USE_LEGACY_KERAS'] = "1"
 import tensorflow as tf
 import numpy as np
 from objectdetection.utils import fixed_padding
@@ -12,7 +12,8 @@ _ANCHORS = [(10, 13), (16, 30), (33, 23),
             (116, 90), (156, 198), (373, 326)]
 _MODEL_SIZE = (None, None)
 
-_MINIMAL_YOLO_CHECKPOINT_DIR = "objectdetection/ckeckpoints/minial_yolo.weights.h5"
+# _MINIMAL_YOLO_CHECKPOINT_DIR = "objectdetection/ckeckpoints/minial_yolo.weights.h5"
+_MINIMAL_YOLO_CHECKPOINT_DIR = "objectdetection/ckeckpoints/minimal_yolo.npz"
 _YOLO_CHECKPOINT_DIR = "objectdetection/ckeckpoints/yolo.weights.h5"
 _BNPLUSLRELU_CHECKPOINT_DIR = "objectdetection/ckeckpoints/V13.weights.h5"
 
@@ -418,10 +419,20 @@ class MinimalYoloV3(tf.keras.Model):
         self.data_format = data_format
 
         # store created layers and variable order for inspection/debug
-        self.layer_map = {}
+        self.layer_map = []
         self._vars_ordered = []
         self.build((None, _MODEL_SIZE[0], _MODEL_SIZE[1], 3))
-        self.load_weights(_MINIMAL_YOLO_CHECKPOINT_DIR)
+        # self.load_weights(_MINIMAL_YOLO_CHECKPOINT_DIR)
+        a = np.load(_MINIMAL_YOLO_CHECKPOINT_DIR, allow_pickle=True)
+        obj = a['arr_0'].item()  # directly unwrap to dict
+
+        for layer in self.layers:
+            flag = False
+            if layer.name in obj:
+                layer.set_weights(obj[layer.name])
+                flag = True
+            if not flag:
+                print(layer.name)
 
 
 
@@ -429,14 +440,15 @@ class MinimalYoloV3(tf.keras.Model):
         return tf.nn.leaky_relu(inputs, alpha=_LEAKY_RELU)
 
     def _apply_conv(self, x, name_prefix, training):
-        conv = self.layer_map[name_prefix + '_conv']
+        # conv = self.layer_map[name_prefix + '_conv']
+        conv = getattr(self, name_prefix + '_conv')
         if any(s > 1 for s in conv.strides):
             kernel_size = conv.kernel_size[0] if isinstance(conv.kernel_size, (list, tuple)) else conv.kernel_size
             x = fixed_padding(x, kernel_size, self.data_format)
         x = conv(x)
         bn_key = name_prefix + '_bn'
         if bn_key in self.layer_map:
-            bn = self.layer_map[bn_key]
+            bn = getattr(self, bn_key)
             x = bn(x, training=training)
         x = self.leaky(x)
         return x
@@ -464,7 +476,8 @@ class MinimalYoloV3(tf.keras.Model):
                                       use_bias=use_bias, data_format=data_format_layer,
                                       kernel_initializer='glorot_uniform',
                                       name=f'{name_prefix}_conv')
-        self.layer_map[f'{name_prefix}_conv'] = conv
+        setattr(self, f'{name_prefix}_conv', conv)  
+        self.layer_map.append(f'{name_prefix}_conv')
 
         if input_shape is None:
             raise ValueError("input_shape must be provided for building layers.")
@@ -474,7 +487,8 @@ class MinimalYoloV3(tf.keras.Model):
             bn = tf.keras.layers.BatchNormalization(axis=1 if self.data_format == 'channels_first' else 3,
                                                     momentum=_BATCH_NORM_DECAY, epsilon=_BATCH_NORM_EPSILON,
                                                     name=f'{name_prefix}_bn')
-            self.layer_map[f'{name_prefix}_bn'] = bn
+            setattr(self, f'{name_prefix}_bn', bn)  
+            self.layer_map.append(f'{name_prefix}_bn')
             out_shape = self._conv_output_shape(input_shape, filters, strides)
             bn.build(out_shape)
 
