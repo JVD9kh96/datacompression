@@ -7,10 +7,12 @@ from tensorflow.keras import layers, Model
 
 # Try import tensorflow_compression
 try:
-    import tensorflow_compression as tfc
+    from tensorflow_compression.entropy_models import\
+             ContinuousBatchedEntropyModel as EntropyBottleneck
     _HAS_TFC = True
 except Exception:
     _HAS_TFC = False
+    from compression import EntropyBottleneck
     raise RuntimeError("Please install tensorflow-compression (tfc). E.g. pip install tensorflow-compression")
 
 from models.layers import ResidualBlock, ResidualBlockUpsample,\
@@ -140,7 +142,7 @@ class MultiTaskCodec(Model):
         self.ctxs = [MaskedConv2D(filters=2*L, kernel_size=5, mask_type='A') for L in self.slice_sizes]
         self.eps = [EntropyParameter(L) for L in self.slice_sizes]
         # z entropy bottleneck (tfc)
-        self.entropy_bottleneck = tfc.EntropyBottleneck()
+        self.entropy_bottleneck = EntropyBottleneck()
     def call(self, x, training=True):
         # Analysis
         y = self.analysis(x)  # [B, ny, nx, C]

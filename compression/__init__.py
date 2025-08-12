@@ -1,0 +1,2 @@
+# from compression.continuous_batched import ContinuousBatchedEntropyModel
+from compression.entropymodels import EntropyBottleneck
