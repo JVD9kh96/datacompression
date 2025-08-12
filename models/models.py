@@ -72,25 +72,31 @@ class HyperAnalysis(Model):
     def __init__(self, C=192):
         super().__init__()
         self.conv1 = layers.Conv2D(C, 3, strides=1, padding='same', activation=tf.nn.leaky_relu)
-        self.conv2 = layers.Conv2D(C, 3, strides=2, padding='same', activation=tf.nn.leaky_relu)
-        self.conv3 = layers.Conv2D(C, 3, strides=1, padding='same', activation=tf.nn.leaky_relu)
-        self.conv4 = layers.Conv2D(C, 3, strides=2, padding='same', activation=None)  # z channels = C
+        self.conv2 = layers.Conv2D(C, 3, strides=1, padding='same', activation=tf.nn.leaky_relu)
+        self.conv3 = layers.Conv2D(C, 3, strides=2, padding='same', activation=tf.nn.leaky_relu)
+        self.conv4 = layers.Conv2D(C, 3, strides=1, padding='same', activation=tf.nn.leaky_relu)
+        self.conv5 = layers.Conv2D(C, 3, strides=2, padding='same', activation=None)  # z channels = C
     def call(self, y):
         x = self.conv1(y)
         x = self.conv2(x)
         x = self.conv3(x)
         z = self.conv4(x)
+        z = self.conv5(x)
         return z
 
 class HyperSynthesis(Model):
     def __init__(self, C=192):
         super().__init__()
         self.up1 = layers.Conv2DTranspose(C, 3, strides=2, padding='same', activation=tf.nn.leaky_relu)
+        self.up2 = layers.Conv2DTranspose(int(C*1.5), 3, strides=2, padding='same', activation=tf.nn.leaky_relu)
         self.conv1 = layers.Conv2D(C, 3, padding='same', activation=tf.nn.leaky_relu)
+        self.conv2 = layers.Conv2D(int(C*1.5), 3, padding='same', activation=tf.nn.leaky_relu)
         self.conv_out = layers.Conv2D(2*C, 3, padding='same', activation=None)  # H: 2*C channels
     def call(self, z_hat):
-        x = self.up1(z_hat)
-        x = self.conv1(x)
+        x = self.conv1(z_hat)
+        x = self.up1(x)
+        x = self.conv2(x)
+        x = self.up2(x)
         H = self.conv_out(x)
         return H
 

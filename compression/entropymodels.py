@@ -1,8 +1,7 @@
-import os 
-os.environ['TF_USE_LEGACY_KERAS'] = "1"
+# entropy_bottleneck_tf2.py
+import numpy as np
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
-import numpy as np
 
 
 class EntropyModel(Layer):
@@ -55,12 +54,12 @@ class EntropyModel(Layer):
 class EntropyBottleneck(EntropyModel):
   """TF2-eager-compatible EntropyBottleneck for training-time use.
 
-  Implements identical math to tensorflow_compression. It computes:
-   - auxiliary loss (quantiles),
-   - medians for quantization,
-   - discrete likelihoods for the quantized/perturbed values.
+  Implements identical math to tensorflow_compression for training:
+    - auxiliary quantile loss,
+    - medians for quantization,
+    - discrete likelihoods for perturbed/quantized values.
 
-  NOTE: compress()/decompress() (binary coder) are NOT implemented here.
+  Compression/decompression (range coder) is NOT implemented here.
   """
 
   def __init__(self, init_scale=10, filters=(3, 3, 3),
@@ -93,13 +92,23 @@ class EntropyBottleneck(EntropyModel):
     ndim = self.input_spec.ndim
     channel_axis = self._channel_axis(ndim)
     channels = self.input_spec.axes[channel_axis]
-    # Tuple of slices to expand a vector across input dims (vector runs across channels)
+    # Tuple of slices for expanding tensors to input shape.
     input_slices = ndim * [None]
     input_slices[channel_axis] = slice(None)
-    return ndim, channel_axis, channels, tuple(input_slices)
+    input_slices = tuple(input_slices)
+    return ndim, channel_axis, channels, input_slices
 
   def _logits_cumulative(self, inputs, stop_gradient):
-    # inputs: shape (channels, filters_prev, N) (the original used (channels,1,batch))
+    """Evaluate logits of the cumulative densities.
+
+    `inputs` is expected to have shape (channels, filters_prev, N). If a 2-D
+    tensor of shape (channels, N) is passed, it is promoted to
+    (channels, 1, N) for batched matmul compatibility.
+    """
+    # Promote 2-D inputs (channels, N) --> (channels, 1, N)
+    if inputs.shape.ndims == 2:
+      inputs = inputs[:, None, :]
+
     logits = inputs
     for i in range(len(self.filters) + 1):
       matrix = self._matrices[i]
@@ -137,7 +146,6 @@ class EntropyBottleneck(EntropyModel):
     self._biases = []
     self._factors = []
     for i in range(len(self.filters) + 1):
-      # initializer constant same as tfc
       init = np.log(np.expm1(1 / scale / filters[i + 1]))
       mat_shape = (channels, filters[i + 1], filters[i])
       matrix = self.add_weight(
@@ -191,7 +199,7 @@ class EntropyBottleneck(EntropyModel):
     medians = quantiles[:, 0, 1]
     self._medians = tf.stop_gradient(medians)
 
-    # minima/maxima for PMF sampling ranges (kept for parity / internal bookkeeping)
+    # minima/maxima for PMF sampling ranges (bookkeeping)
     minima = medians - quantiles[:, 0, 0]
     minima = tf.cast(tf.math.ceil(minima), tf.int32)
     minima = tf.math.maximum(minima, 0)
@@ -199,16 +207,15 @@ class EntropyBottleneck(EntropyModel):
     maxima = tf.cast(tf.math.ceil(maxima), tf.int32)
     maxima = tf.math.maximum(maxima, 0)
 
-    # offsets / pmf start / pmf length (not used for training likelihoods directly here,
-    # but computed to stay close to original implementation)
+    # offsets / pmf start / pmf length
     self._offset = -minima
     pmf_start = medians - tf.cast(minima, self.dtype or tf.float32)
     pmf_length = maxima + minima + 1
 
-    # sample densities for bookkeeping (not stored as CDF var since no range coder here)
+    # sample densities for bookkeeping (shape: (channels, 1, max_length))
     max_length = tf.reduce_max(pmf_length)
-    samples = tf.range(tf.cast(max_length, self.dtype or tf.float32), dtype=self.dtype or tf.float32)
-    samples = samples[None, :] + pmf_start[:, None]
+    samples_base = tf.range(tf.cast(max_length, self.dtype or tf.float32), dtype=self.dtype or tf.float32)
+    samples = samples_base[None, None, :] + pmf_start[:, None, None]
 
     half = tf.constant(0.5, dtype=self.dtype or tf.float32)
     lower = self._logits_cumulative(samples - half, stop_gradient=True)
@@ -218,9 +225,10 @@ class EntropyBottleneck(EntropyModel):
     pmf = pmf[:, 0, :]
 
     # tail mass (kept to match semantics)
-    tail_mass = (tf.math.sigmoid(lower[:, 0:1, :1]) if False else
-                 tf.math.sigmoid(lower[:, 0, :1]))  # keep shape consistent
-    # (we don't need to use tail_mass further in this TF2 training-only variant)
+    tail_mass = tf.math.add_n([
+        tf.math.sigmoid(lower[:, 0, :1]),
+        tf.math.sigmoid(-upper[:, 0, -1:]),
+    ])
 
     super().build(input_shape)
 

@@ -24,7 +24,7 @@ class YoloV3(tf.keras.Model):
                  confidence_threshold=0.5, data_format=None, name='yolo_v3_model'):
         super().__init__(name=name)
         if not data_format:
-            data_format = 'channels_first' if tf.test.is_built_with_cuda() else 'channels_last'
+            data_format = 'channels_last'
 
         self.n_classes = n_classes
         self.model_size = model_size
@@ -412,7 +412,7 @@ class MinimalYoloV3(tf.keras.Model):
     def __init__(self,  model_size=(None, None), data_format=None, name='minimal_yolo_v3_model'):
         super().__init__(name=name)
         if not data_format:
-            data_format = 'channels_first' if tf.test.is_built_with_cuda() else 'channels_last'
+            data_format = 'channels_last'
 
         self.model_size = model_size
 
@@ -469,7 +469,7 @@ class MinimalYoloV3(tf.keras.Model):
             return (None, H_out, W_out, out_filters)
 
     def _create_conv_bn_build(self, name_prefix, filters, kernel_size, strides=1, use_bias=False, input_shape=None):
-        data_format_layer = 'channels_first' if self.data_format == 'channels_first' else 'channels_last'
+        data_format_layer = 'channels_last'
         padding = 'valid' if strides > 1 else 'same'
         conv = tf.keras.layers.Conv2D(filters=filters, kernel_size=kernel_size,
                                       strides=strides, padding=padding,
