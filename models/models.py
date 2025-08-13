@@ -250,20 +250,18 @@ class MultiTaskCodec(Model):
     def call(self, x, training=True):
         # Analysis
         y = self.analysis(x)  # [B, ny, nx, C]
+        # for y: do NOT perturb here for z-handling below; we'll perturb y separately
         if training:
             y_tilde = add_uniform_noise(y)
         else:
             y_tilde = ste_round(y)
-        # Hyper
+
+        # Hyper analysis
         z = self.ha(y)
-        if training:
-            z_tilde = add_uniform_noise(z)
-        else:
-            z_tilde = ste_round(z)
-        # Hyper compression: training-time we still compute z likelihood via entropy_bottleneck
-        if training:
-            z_likelihoods = None
-        # Hyper synthesis -> H (2*C channels)
+
+        # IMPORTANT: let the entropy bottleneck handle noise/quantize and also return likelihoods
+        z_tilde, z_entropy_out = self.entropy_bottleneck(z, training=training)
+        # use the returned z_tilde for hyper synthesis (H must match quantization used for z)
         H = self.hs(z_tilde)
         # split H into Hj for each sub-latent (each Hj has 2*Lj channels per paper)
         Hj_list = []
@@ -288,15 +286,40 @@ class MultiTaskCodec(Model):
             y_like_slices.append(like)
             start += Lj
         y_likelihoods = tf.concat(y_like_slices, axis=-1)
-        # z likelihood via tfc (training: use entropy_bottleneck...)
-        # We compute z_likelihoods for rate term using tfc API (call with training flag)
-        _, z_likelihoods = self.entropy_bottleneck(z, training=training)
-        # Reconstruct x_hat
-        x_hat = self.synthesis(y_tilde if training else ste_round(y))
+        # convert z_entropy_out to bits consistently (keep batch dimension)
+        def entropy_output_to_bits_tensor(z_out):
+            z_out = tf.convert_to_tensor(z_out)
+            # if values all <=1.0 assume probabilities
+            maxv = tf.reduce_max(z_out)
+            def probs_to_bits():
+                # sum over spatial+channel dims, keep batch axis if present
+                # assume z_out shape [B,Hz,Wz,Cz] or [Hz,Wz,Cz] etc.
+                # compute -sum(log(p))/log(2)
+                nats = -tf.reduce_sum(tf.math.log(tf.clip_by_value(z_out, 1e-12, 1.0)), axis=list(range(1, tf.rank(z_out))))
+                bits = nats / tf.math.log(tf.constant(2.0))
+                return bits
+            def values_are_bits():
+                # sum across axes other than batch (if present)
+                if tf.rank(z_out) == 1:
+                    return tf.reduce_sum(tf.cast(z_out, tf.float32))
+                else:
+                    return tf.reduce_sum(tf.cast(z_out, tf.float32), axis=list(range(1, tf.rank(z_out))))
+            bits = tf.cond(tf.less_equal(maxv, 1.0), probs_to_bits, values_are_bits)
+            return bits
+
+        z_bits_per_batch_or_per_image = entropy_output_to_bits_tensor(z_entropy_out)
+        # If you want total bits for the batch:
+        if tf.rank(z_bits_per_batch_or_per_image) == 0:
+            z_bits_total = z_bits_per_batch_or_per_image
+        else:
+            z_bits_total = tf.reduce_sum(z_bits_per_batch_or_per_image)  # sum per-image bits to scalar
+
+        # When computing training loss R you should add (bits_y + z_bits_total) appropriately
+        # but for returning from call keep both outputs:
         return {
             'x_hat': x_hat, 'y': y, 'y_tilde': y_tilde,
             'z': z, 'z_tilde': z_tilde, 'H': H,
-            'y_likelihoods': y_likelihoods, 'z_likelihoods': z_likelihoods,
-            'means_list': means_list, 'scales_list': scales_list,
+            'y_likelihoods': y_likelihoods, 'z_entropy_out': z_entropy_out,
+            'z_bits_total': z_bits_total,
             'slice_sizes': self.slice_sizes
         }
