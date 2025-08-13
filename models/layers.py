@@ -3,7 +3,7 @@ os.environ['TF_USE_LEGACY_KERAS'] = "1"
 import math
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers
+from tensorflow.keras import layers, initializers
 try:
     import tensorflow_compression as tfc
     TF_COMPRESSION_AVAILABLE = True
@@ -151,16 +151,53 @@ class MaskedConv2D(layers.Layer):
 # Entropy Parameter (EP) block: three Conv(3) -> output 2*Lj (means & scales)
 # -----------------------------------------------------------
 class EntropyParameter(layers.Layer):
-    def __init__(self, Lj, hidden=None):
+    def __init__(self, Lj, hidden=None, scale_bias_init=-4.0):
         super().__init__()
         self.Lj = Lj
         if hidden is None:
             hidden = max(4*Lj, 128)
-        self.conv0 = layers.Conv2D(hidden, 3, padding='same', activation=tf.nn.leaky_relu)
-        self.conv1 = layers.Conv2D(hidden, 3, padding='same', activation=tf.nn.leaky_relu)
-        self.conv_out = layers.Conv2D(2*Lj, 3, padding='same', activation=None)
+
+        # Use good defaults for conv initializers
+        self.conv0 = layers.Conv2D(
+            hidden, 3, padding='same',
+            activation=tf.nn.leaky_relu,
+            kernel_initializer=initializers.HeNormal()
+        )
+        self.conv1 = layers.Conv2D(
+            hidden, 3, padding='same',
+            activation=tf.nn.leaky_relu,
+            kernel_initializer=initializers.HeNormal()
+        )
+
+        # conv_out produces 2*Lj channels: [means, scales_raw]
+        # We'll use a small negative bias for the scales part so softplus(start) is small.
+        # Create a custom initializer for the bias that sets the second half to scale_bias_init.
+        def bias_init(shape, dtype=None):
+            # shape[-1] == 2*Lj
+            b = tf.zeros(shape, dtype=dtype or tf.float32)
+            if len(shape) == 1 and shape[0] == 2*self.Lj:
+                # set second half (scales_raw) biases to scale_bias_init
+                b = tf.concat(
+                    [tf.zeros((self.Lj,), dtype=b.dtype),
+                     tf.fill((self.Lj,), tf.constant(scale_bias_init, dtype=b.dtype))],
+                    axis=0
+                )
+            return b
+
+        self.conv_out = layers.Conv2D(
+            2 * Lj, 3, padding='same', activation=None,
+            kernel_initializer=initializers.RandomNormal(0.0, 1e-3),
+            bias_initializer=bias_init
+        )
+
     def call(self, x):
-        y = self.conv0(x); y = self.conv1(y); out = self.conv_out(y)
+        y = self.conv0(x)
+        y = self.conv1(y)
+        out = self.conv_out(y)
         means, scales_raw = tf.split(out, 2, axis=-1)
-        scales = tf.nn.softplus(scales_raw) + 1e-6
+
+        # dtype-safe epsilon
+        eps = tf.constant(1e-6, dtype=means.dtype)
+        scales = tf.nn.softplus(scales_raw) + eps
+
         return means, scales

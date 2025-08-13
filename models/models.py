@@ -232,7 +232,7 @@ class LatentSpaceTransform(Model):
 # - calculates discrete-likelihoods per-slice and total R
 # - returns x_hat reconstruction as well
 # -----------------------------------------------------------
-class MultiTaskCodec(Model):
+class MultiTaskCodec(tf.keras.Model):
     def __init__(self, C=192, base_channels=128):
         super().__init__()
         self.C = C
@@ -247,29 +247,43 @@ class MultiTaskCodec(Model):
         self.eps = [EntropyParameter(L) for L in self.slice_sizes]
         # z entropy bottleneck (tfc)
         self.entropy_bottleneck = EntropyBottleneck()
+
     def call(self, x, training=True):
         # Analysis
-        y = self.analysis(x)  # [B, ny, nx, C]
+        y = self.analysis(x)  # [B, ny, nx, C] (assumed NHWC)
         # for y: do NOT perturb here for z-handling below; we'll perturb y separately
         if training:
             y_tilde = add_uniform_noise(y)
         else:
             y_tilde = ste_round(y)
 
+        # Optional reconstruction from y_tilde
+        x_hat = self.synthesis(y_tilde)
+
         # Hyper analysis
         z = self.ha(y)
 
-        # IMPORTANT: let the entropy bottleneck handle noise/quantize and also return likelihoods
+        # Let entropy bottleneck handle noise/quantize and return likelihoods
+        # z_tilde: perturbed/dequantized z (used for likelihoods), z_entropy_out: probabilities
         z_tilde, z_entropy_out = self.entropy_bottleneck(z, training=training)
-        # use the returned z_tilde for hyper synthesis (H must match quantization used for z)
-        H = self.hs(z_tilde)
+
+        # Build straight-through rounded z_hat with medians and use that for hyper-synthesis
+        z_medians = self.entropy_bottleneck._get_medians()   # shape (channels,)
+        z_offset = expand_medians(z_medians, z)              # shape [1,1,1,C] for NHWC
+        z_tmp = z - z_offset
+        z_hat = z_tmp + tf.stop_gradient(tf.round(z_tmp) - z_tmp) + z_offset
+
+        # Use z_hat (STE-rounded) for hyper-synthesis / parameter nets
+        H = self.hs(z_hat)
+
         # split H into Hj for each sub-latent (each Hj has 2*Lj channels per paper)
         Hj_list = []
         ch = 0
         for Lj in self.slice_sizes:
-            Hj = H[..., 2*ch: 2*(ch+Lj)]
+            Hj = H[..., 2*ch: 2*(ch + Lj)]
             Hj_list.append(Hj)
             ch += Lj
+
         # compute CTX and EP per slice
         start = 0
         y_like_slices = []
@@ -281,46 +295,30 @@ class MultiTaskCodec(Model):
             Hj = Hj_list[j]                         # B,H,W,2*Lj
             concat = tf.concat([ctx, Hj], axis=-1)
             means, scales = self.eps[j](concat)     # each B,H,W,Lj
-            means_list.append(means); scales_list.append(scales)
+            means_list.append(means)
+            scales_list.append(scales)
+
+            # discrete Gaussian likelihood (returns probabilities in (0,1])
             like = discrete_gaussian_likelihood(y_slice, means, scales)
             y_like_slices.append(like)
             start += Lj
-        y_likelihoods = tf.concat(y_like_slices, axis=-1)
-        # convert z_entropy_out to bits consistently (keep batch dimension)
-        def entropy_output_to_bits_tensor(z_out):
-            z_out = tf.convert_to_tensor(z_out)
-            # if values all <=1.0 assume probabilities
-            maxv = tf.reduce_max(z_out)
-            def probs_to_bits():
-                # sum over spatial+channel dims, keep batch axis if present
-                # assume z_out shape [B,Hz,Wz,Cz] or [Hz,Wz,Cz] etc.
-                # compute -sum(log(p))/log(2)
-                nats = -tf.reduce_sum(tf.math.log(tf.clip_by_value(z_out, 1e-12, 1.0)), axis=list(range(1, tf.rank(z_out))))
-                bits = nats / tf.math.log(tf.constant(2.0))
-                return bits
-            def values_are_bits():
-                # sum across axes other than batch (if present)
-                if tf.rank(z_out) == 1:
-                    return tf.reduce_sum(tf.cast(z_out, tf.float32))
-                else:
-                    return tf.reduce_sum(tf.cast(z_out, tf.float32), axis=list(range(1, tf.rank(z_out))))
-            bits = tf.cond(tf.less_equal(maxv, 1.0), probs_to_bits, values_are_bits)
-            return bits
 
-        z_bits_per_batch_or_per_image = tf.stop_gradient(entropy_output_to_bits_tensor(z_entropy_out))
-        # If you want total bits for the batch:
-        if tf.rank(z_bits_per_batch_or_per_image) == 0:
-            z_bits_total = z_bits_per_batch_or_per_image
-        else:
-            z_bits_total = tf.reduce_sum(z_bits_per_batch_or_per_image)  # sum per-image bits to scalar
+        y_likelihoods = tf.concat(y_like_slices, axis=-1)  # shape [B,H,W,C]
 
-        # When computing training loss R you should add (bits_y + z_bits_total) appropriately
-        # but for returning from call keep both outputs:
+        # z_entropy_out is the entropy bottleneck's likelihood for z (same shape as z_tilde)
+        # Return dictionary
         return {
-            'x_hat': x_hat, 'y': y, 'y_tilde': y_tilde,
-            'z': z, 'z_tilde': z_tilde, 'H': H,
-            'y_likelihoods': y_likelihoods, 'z_entropy_out': z_entropy_out,
-            'z_bits_total': z_bits_total,
-            'slice_sizes': self.slice_sizes,
-            'z_bits_per_batch_or_per_image':z_bits_per_batch_or_per_image,
+            'x_hat': x_hat,
+            'y': y,
+            'y_tilde': y_tilde,
+            'y_likelihoods': y_likelihoods,     # probabilities p(y_i)
+            'z': z,
+            'z_tilde': z_tilde,
+            'z_hat': z_hat,
+            'z_likelihoods': z_entropy_out,     # probabilities p(z_i)
+            'H': H,
+            'means_list': means_list,
+            'scales_list': scales_list,
+            'slice_sizes': self.slice_sizes
         }
+    

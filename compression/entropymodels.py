@@ -257,6 +257,8 @@ class EntropyBottleneck(EntropyModel):
     outputs = tf.cast(inputs, self.dtype or tf.float32)
     return outputs + medians
 
+  
+
   def _likelihood(self, inputs):
     ndim, channel_axis, _, _ = self._get_input_dims()
     half = tf.constant(0.5, dtype=self.dtype or tf.float32)
@@ -288,3 +290,8 @@ class EntropyBottleneck(EntropyModel):
 
   def decompress(self, strings, **kwargs):
     raise NotImplementedError("Decompression (range coder) not implemented in pure-TF training-only EntropyBottleneck.")
+
+  def _get_medians(self):
+    """Return the medians used for quantization.
+    """
+    return self._medians
