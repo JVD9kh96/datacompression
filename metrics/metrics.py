@@ -40,6 +40,31 @@ import tensorflow as tf
 _EPS = 1e-12
 _SQRT2 = math.sqrt(2.0)
 
+def bits_from_likelihoods_np(lik_np, eps=1e-12):
+    lik = np.asarray(lik_np)
+    lik = np.nan_to_num(lik, nan=eps, posinf=1.0, neginf=eps)
+    lik = np.clip(lik, eps, 1.0)
+    nats = -np.sum(np.log(lik))
+    bits = float(nats / math.log(2.0))
+    return bits
+
+def z_bits_from_entropy_output(z_out):
+    """
+    Accept different possible z outputs:
+      - per-element likelihoods tensor (shape [B, hz, wz, Cz]) -> convert to bits
+      - already-summed bits vector/tensor ([B] or scalar) -> sum to scalar bits
+    """
+    arr = np.asarray(z_out)
+    if arr.size == 0:
+        return 0.0
+    # Heuristic: if all values in (0,1] -> treat as likelihoods
+    if np.all((arr > 0.0) & (arr <= 1.0)):
+        return bits_from_likelihoods_np(arr)
+    # If values are small floats but > 1e-6 and arr.ndim == 1: maybe bits per image
+    if arr.ndim == 1:
+        return float(np.sum(arr))
+    # else fall back to computing as if they were probs
+    return bits_from_likelihoods_np(arr)
 
 def clip_probs(p: np.ndarray, eps: float = _EPS) -> np.ndarray:
     """Clip probabilities to [eps, 1]. Works on numpy arrays."""
