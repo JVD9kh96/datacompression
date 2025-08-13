@@ -30,55 +30,115 @@ LN2 = math.log(2.0)
 # --------------------------
 # Rate / Entropy helpers
 # --------------------------
-def rate_from_likelihoods(likelihoods: np.ndarray, divide_by_pixels: Optional[int] = None) -> Dict[str, float]:
+# metrics.py
+import math
+from typing import Dict, Any, Optional
+import numpy as np
+import tensorflow as tf
+
+# stable epsilon for probabilities
+_EPS = 1e-12
+_SQRT2 = math.sqrt(2.0)
+
+
+def clip_probs(p: np.ndarray, eps: float = _EPS) -> np.ndarray:
+    """Clip probabilities to [eps, 1]. Works on numpy arrays."""
+    p = np.asarray(p)
+    p = np.nan_to_num(p, nan=eps, posinf=1.0, neginf=eps)
+    p = np.clip(p, eps, 1.0)
+    return p
+
+
+def discrete_gaussian_likelihood_tf(x: tf.Tensor,
+                                   mu: tf.Tensor,
+                                   sigma: tf.Tensor,
+                                   eps: float = _EPS) -> tf.Tensor:
     """
-    Compute H ≈ E[-log2 p] from likelihoods.
-
-    Args:
-      likelihoods: numpy array of likelihood values p(y) for quantized latents.
-                   Typical shapes: [B, H, W, C] or [B, H, W] etc.
-      divide_by_pixels: if provided, divide total bits by this integer (e.g. number of input pixels)
-                        to return bpp. If None, returns total bits (not per-pixel).
-
-    Returns:
-      dict with keys:
-        - 'bits' : total bits (sum over all samples)
-        - 'bpp'  : bits per pixel (if divide_by_pixels provided), else None
-        - 'n_samples' : number of likelihood entries summed
+    Compute discrete Gaussian probability P(X = round(x)) ≈ Phi(x+0.5) - Phi(x-0.5).
+    All arguments are tf.Tensors of broadcastable shapes (e.g. [B,H,W,C]).
+    Returns probabilities (not log).
     """
-    p = np.asarray(likelihoods, dtype=np.float64)
-    # numerical guard
-    eps = 1e-12
-    p = np.maximum(p, eps)
+    # ensure sigma positive
+    sigma = tf.maximum(sigma, 1e-6)
+    upper = 0.5 * (1.0 + tf.math.erf((x + 0.5 - mu) / (sigma * _SQRT2)))
+    lower = 0.5 * (1.0 + tf.math.erf((x - 0.5 - mu) / (sigma * _SQRT2)))
+    p = upper - lower
+    p = tf.clip_by_value(p, eps, 1.0)
+    return p
 
-    # sum negative natural log -> nats
-    nats = -np.sum(np.log(p))
-    bits = nats / LN2
 
-    ret = {'bits': float(bits), 'n_samples': int(p.size)}
-    if divide_by_pixels is not None and divide_by_pixels > 0:
-        ret['bpp'] = float(bits) / float(divide_by_pixels)
+def discrete_gaussian_mixture_likelihood_tf(x: tf.Tensor,
+                                           mus: tf.Tensor,
+                                           sigmas: tf.Tensor,
+                                           logits: tf.Tensor,
+                                           eps: float = _EPS) -> tf.Tensor:
+    """
+    Numerically-stable mixture likelihood:
+      p(x) = sum_k softmax(logits)_k * (Phi(x+0.5; mu_k, sigma_k) - Phi(x-0.5; mu_k, sigma_k))
+    Shapes:
+      x: [..., C]
+      mus, sigmas, logits: [..., C, K]
+    Returns: p: [..., C] (probabilities)
+    """
+    # compute per-component cdf diffs => shape [..., C, K]
+    x_exp = tf.expand_dims(x, axis=-1)  # [..., C, 1]
+    upper = 0.5 * (1.0 + tf.math.erf((x_exp + 0.5 - mus) / (sigmas * _SQRT2)))
+    lower = 0.5 * (1.0 + tf.math.erf((x_exp - 0.5 - mus) / (sigmas * _SQRT2)))
+    comp_p = upper - lower  # [..., C, K]
+    # mixture weights
+    w = tf.nn.softmax(logits, axis=-1)  # [..., C, K]
+    # weighted sum
+    p = tf.reduce_sum(w * comp_p, axis=-1)
+    p = tf.clip_by_value(p, eps, 1.0)
+    return p
+
+
+def bits_from_likelihoods_np(lik: np.ndarray, eps: float = _EPS) -> float:
+    """
+    Convert numpy array of per-element probabilities to total bits.
+    Returns scalar bits (sum over all elements).
+    """
+    lik = clip_probs(lik, eps=eps)
+    # sum of -log2(p) over all elements
+    nats = -np.log(lik).sum()
+    bits = float(nats / math.log(2.0))
+    return bits
+
+
+def rate_from_likelihoods(y_likelihoods: np.ndarray, divide_by_pixels: Optional[int] = None) -> Dict[str, float]:
+    """
+    y_likelihoods: numpy array [B, Hy, Wx, C] or any shape of probabilities
+    divide_by_pixels: integer number of input pixels (B * H_in * W_in). If None, function returns bits only.
+    Returns {'bits': total_bits, 'bpp': bits_per_pixel (or None)}
+    """
+    bits = bits_from_likelihoods_np(y_likelihoods)
+    if divide_by_pixels is None or divide_by_pixels == 0:
+        bpp = None
     else:
-        ret['bpp'] = None
-    return ret
+        bpp = bits / float(divide_by_pixels)
+    return {'bits': bits, 'bpp': bpp}
 
 
-def rate_fraction_base(y1_likelihoods: np.ndarray, y_likelihoods: np.ndarray) -> float:
+def rate_fraction_base(y1_like: np.ndarray, y_like: np.ndarray) -> float:
     """
-    Compute fraction H(Y1) / H(Y) * 100 (percentage).
-
-    Args:
-      y1_likelihoods: likelihoods for base sub-latent Y1 (numpy array same shape as subset)
-      y_likelihoods: likelihoods for entire latent Y
-
-    Returns:
-      percentage (float)
+    Compute percentage 100 * H(Y1) / H(Y)
+    y1_like, y_like are numpy probability arrays (must correspond to same batch/pixels).
     """
-    r1 = rate_from_likelihoods(y1_likelihoods)
-    r = rate_from_likelihoods(y_likelihoods)
-    if r['bits'] <= 0:
+    bits_y1 = bits_from_likelihoods_np(y1_like)
+    bits_y = bits_from_likelihoods_np(y_like)
+    if bits_y <= 0:
         return 0.0
-    return 100.0 * (r1['bits'] / r['bits'])
+    return 100.0 * (bits_y1 / bits_y)
+
+
+# -------------------------------
+# A diagnostic utility to print suspicious cases
+# -------------------------------
+def print_likelihood_stats_np(lik: np.ndarray, name: str = 'lik'):
+    lik = np.asarray(lik)
+    print(f"{name}.shape = {lik.shape}")
+    print(f"{name}.min, max, mean, zeros = {lik.min()}, {lik.max()}, {lik.mean()}, {(lik <= 0).sum()}")
+
 
 
 # --------------------------
@@ -345,48 +405,49 @@ def estimate_mi_kde(
 # --------------------------
 # convenience wrappers to integrate with TF model outputs
 # --------------------------
+# in metrics.py (append)
 def compute_rate_metrics_from_model_outputs(model_out: Dict[str, np.ndarray], input_pixels: int) -> Dict[str, Any]:
-    """
-    Given the model outputs (numpy arrays) compute rates used in Fig.7:
-      - total H(Y) bpp
-      - base H(Y1) bpp
-      - percentage H(Y1) / H(Y)
-
-    Args:
-      model_out: dict expected to contain:
-         - 'y_likelihoods' : shape [B, Hy, Wx, C] (likelihoods for full Y)
-         - 'y1_likelihoods' : likelihoods for base Y1 (or if not provided, assume first L channels are base and
-                              slice model_out['y_likelihoods'] accordingly)
-      input_pixels: number of input pixels = B * input_H * input_W (used to compute bpp)
-
-    Returns:
-      dict with keys 'H_Y_bits', 'H_Y_bpp', 'H_Y1_bits', 'H_Y1_bpp', 'fraction_percent'
-    """
-    # Extract
+    # y
     if 'y_likelihoods' not in model_out:
-        raise KeyError("model_out must contain 'y_likelihoods' array")
+        raise KeyError("model_out must contain 'y_likelihoods'")
     y_like = np.asarray(model_out['y_likelihoods'])
-    # check if y1 provided
     if 'y1_likelihoods' in model_out:
         y1_like = np.asarray(model_out['y1_likelihoods'])
     else:
-        # assume y1 is first channels of y_like if channel dim present
         if y_like.ndim != 4:
-            raise ValueError("y_likelihoods expected 4D [B,Hy,Wx,C] if 'y1_likelihoods' not provided")
-        # user must tell which fraction is base; fallback: half channels
+            raise ValueError("y_likelihoods expected as [B,Hy,Wx,C]")
         C = y_like.shape[-1]
         L1 = C // 2
         y1_like = y_like[..., :L1]
 
-    total_pixels = int(input_pixels)
-    H_full = rate_from_likelihoods(y_like, divide_by_pixels=total_pixels)
-    H_base = rate_from_likelihoods(y1_like, divide_by_pixels=total_pixels)
+    H_full = rate_from_likelihoods(y_like, divide_by_pixels=input_pixels)
+    H_base = rate_from_likelihoods(y1_like, divide_by_pixels=input_pixels)
     frac = rate_fraction_base(y1_like, y_like)
 
+    # include z bits if present. The TF entropy bottleneck returns bits already; some implementations
+    # may return likelihoods for z instead. We support both:
+    z_bits = 0.0
+    if 'z_bits' in model_out:
+        z_bits = float(model_out['z_bits'])
+    elif 'z_likelihoods' in model_out:
+        # if given likelihoods for z, convert them
+        z_bits = bits_from_likelihoods_np(np.asarray(model_out['z_likelihoods']))
+    elif 'z' in model_out and 'z_tilde' in model_out and 'entropy_bottleneck_bits' in model_out:
+        # user could pass already computed entropy bottleneck number
+        z_bits = float(model_out['entropy_bottleneck_bits'])
+
+    # Add z bits into total bits if you want H(Y)+H(Z) = total coding cost
+    # Many papers add both latent and hyperprior; decide what you want to report.
+    total_bits = H_full['bits'] + z_bits
+    total_bpp = total_bits / float(input_pixels) if input_pixels > 0 else 0.0
+    # base bits do not include z bits (base is subset of y bits)
     return {
         'H_Y_bits': H_full['bits'],
         'H_Y_bpp': H_full['bpp'],
         'H_Y1_bits': H_base['bits'],
         'H_Y1_bpp': H_base['bpp'],
-        'fraction_percent': frac
+        'fraction_percent': frac,
+        'H_Z_bits': z_bits,
+        'Total_bits_including_z': total_bits,
+        'Total_bpp_including_z': total_bpp
     }
