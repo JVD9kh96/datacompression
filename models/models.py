@@ -179,7 +179,7 @@ class HyperAnalysis(Model):
         x = self.conv1(y)
         x = self.conv2(x)
         x = self.conv3(x)
-        z = self.conv4(x)
+        x = self.conv4(x)
         z = self.conv5(x)
         return z
 
@@ -325,3 +325,4 @@ class MultiTaskCodec(tf.keras.Model):
         }
 
     
+
