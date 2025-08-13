@@ -5,6 +5,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, Model
 from models.layers import _FallbackInverseGDN
+from models.utils import expand_medians
 # Try import tensorflow_compression
 try:
     from tensorflow_compression.entropy_models import\

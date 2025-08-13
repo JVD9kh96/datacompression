@@ -15,6 +15,19 @@ def add_uniform_noise(x):
 def ste_round(x):
     return tf.round(x)  # in forward pass when using quantized inference
 
+def expand_medians(medians, x):
+    """Reshape medians (shape [C] or [channels, ...]) to broadcast to tensor x.
+    Works for typical 4D NHWC tensors (B,H,W,C) and also for other ranks if statically known.
+    """
+    # medians: tensor shape (C,)
+    rank = x.shape.rank
+    if rank is None:
+        # fallback to 4D NHWC if dynamic rank unavailable
+        rank = 4
+    # produce shape [1, 1, ..., C] with (rank-1) leading ones
+    target_shape = [1] * (rank - 1) + [medians.shape[0]]
+    return tf.reshape(medians, target_shape)
+
 def discrete_gaussian_likelihood(x, means, scales, eps=1e-12):
     sqrt2 = math.sqrt(2.0)
     upper = 0.5 * (1.0 + tf.math.erf((x + 0.5 - means) / (scales * sqrt2 + eps)))
