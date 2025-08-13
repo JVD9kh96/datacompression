@@ -256,7 +256,8 @@ class MultiTaskCodec(tf.keras.Model):
         if training:
             y_tilde = add_uniform_noise(y)
         else:
-            y_tilde = ste_round(y)
+            # y_tilde = ste_round(y)
+            y_tilde = add_uniform_noise(y) #debuging
 
         # Optional reconstruction from y_tilde
         x_hat = self.synthesis(y_tilde)
@@ -322,4 +323,5 @@ class MultiTaskCodec(tf.keras.Model):
             'scales_list': scales_list,
             'slice_sizes': self.slice_sizes
         }
+
     
