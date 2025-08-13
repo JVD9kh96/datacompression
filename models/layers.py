@@ -157,7 +157,6 @@ class EntropyParameter(layers.Layer):
         if hidden is None:
             hidden = max(4*Lj, 128)
 
-        # Use good defaults for conv initializers
         self.conv0 = layers.Conv2D(
             hidden, 3, padding='same',
             activation=tf.nn.leaky_relu,
@@ -169,14 +168,9 @@ class EntropyParameter(layers.Layer):
             kernel_initializer=initializers.HeNormal()
         )
 
-        # conv_out produces 2*Lj channels: [means, scales_raw]
-        # We'll use a small negative bias for the scales part so softplus(start) is small.
-        # Create a custom initializer for the bias that sets the second half to scale_bias_init.
         def bias_init(shape, dtype=None):
-            # shape[-1] == 2*Lj
             b = tf.zeros(shape, dtype=dtype or tf.float32)
             if len(shape) == 1 and shape[0] == 2*self.Lj:
-                # set second half (scales_raw) biases to scale_bias_init
                 b = tf.concat(
                     [tf.zeros((self.Lj,), dtype=b.dtype),
                      tf.fill((self.Lj,), tf.constant(scale_bias_init, dtype=b.dtype))],
@@ -199,5 +193,8 @@ class EntropyParameter(layers.Layer):
         # dtype-safe epsilon
         eps = tf.constant(1e-6, dtype=means.dtype)
         scales = tf.nn.softplus(scales_raw) + eps
+
+        # Practical clamp to avoid near-delta distributions
+        scales = tf.clip_by_value(scales, clip_value_min=1e-3, clip_value_max=1e3)
 
         return means, scales
