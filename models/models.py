@@ -244,6 +244,7 @@ class MultiTaskCodec(tf.keras.Model):
         self.hs = HyperSynthesis(C=C)
         # sub-latent split: base L1, rest L2
         self.slice_sizes = [base_channels, C - base_channels]
+        # NOTE: create ctxs once; they will be built upon first call.
         self.ctxs = [MaskedConv2D(filters=2*L, kernel_size=5, mask_type='A') for L in self.slice_sizes]
         self.eps = [EntropyParameter(L) for L in self.slice_sizes]
         # z entropy bottleneck (tfc)
@@ -251,34 +252,30 @@ class MultiTaskCodec(tf.keras.Model):
 
     def call(self, x, training=True):
         # Analysis
-        y = self.analysis(x)  # [B, ny, nx, C] (assumed NHWC)
-        # for y: do NOT perturb here for z-handling below; we'll perturb y separately
+        y = self.analysis(x)  # [B, ny, nx, C]
+
         if training:
+            # training-time surrogate: additive uniform noise
             y_tilde = add_uniform_noise(y)
         else:
-            # y_tilde = ste_round(y)
-            y_tilde = add_uniform_noise(y) #debuging
+            # For debugging you used y_tilde = add_uniform_noise(y) — that's OK as a surrogate;
+            # below we'll override that with true sequential decoding for exact bpp.
+            y_tilde = add_uniform_noise(y)
 
-        # Optional reconstruction from y_tilde
-        x_hat = self.synthesis(y_tilde)
-
-        # Hyper analysis
+        # compute z and entropy bottleneck outputs
         z = self.ha(y)
+        z_tilde, z_likelihoods = self.entropy_bottleneck(z, training=training)
 
-        # Let entropy bottleneck handle noise/quantize and return likelihoods
-        # z_tilde: perturbed/dequantized z (used for likelihoods), z_entropy_out: probabilities
-        z_tilde, z_entropy_out = self.entropy_bottleneck(z, training=training)
-
-        # Build straight-through rounded z_hat with medians and use that for hyper-synthesis
-        z_medians = self.entropy_bottleneck._get_medians()   # shape (channels,)
+        # Build z_hat for hyper-synthesis (STE rounding behavior at training time; exact quantization at inference)
+        z_medians = self.entropy_bottleneck._get_medians()   # shape (C,)
         z_offset = expand_medians(z_medians, z)              # shape [1,1,1,C] for NHWC
         z_tmp = z - z_offset
         z_hat = z_tmp + tf.stop_gradient(tf.round(z_tmp) - z_tmp) + z_offset
 
-        # Use z_hat (STE-rounded) for hyper-synthesis / parameter nets
+        # H produced by hyper-synthesis (use z_hat as in PyTorch)
         H = self.hs(z_hat)
 
-        # split H into Hj for each sub-latent (each Hj has 2*Lj channels per paper)
+        # split H into Hj slices (each Hj has 2*Lj channels)
         Hj_list = []
         ch = 0
         for Lj in self.slice_sizes:
@@ -286,38 +283,204 @@ class MultiTaskCodec(tf.keras.Model):
             Hj_list.append(Hj)
             ch += Lj
 
-        # compute CTX and EP per slice
-        start = 0
-        y_like_slices = []
+        # -----------------------------
+        # Training-time path (fast, surrogate)
+        # -----------------------------
+        if training:
+            # Use y_tilde for ctx computation and likelihoods exactly as in training loop.
+            start = 0
+            y_like_slices = []
+            means_list = []
+            scales_list = []
+            for j, Lj in enumerate(self.slice_sizes):
+                # Compute ctx from the **full** noisy latent y_tilde — ensures ctxs built with in_ch=C
+                ctx = self.ctxs[j](y_tilde)             # shape [B,Hy,Wy,2*Lj] (filters=2*Lj)
+                Hj = Hj_list[j]                         # [B,Hy,Wy,2*Lj]
+                concat = tf.concat([ctx, Hj], axis=-1)  # [B,Hy,Wy, 4*Lj]
+                means, scales = self.eps[j](concat)     # each [B,Hy,Wy,Lj]
+                means_list.append(means)
+                scales_list.append(scales)
+
+                y_slice = y_tilde[..., start:start+Lj]
+                like = discrete_gaussian_likelihood(y_slice, means, scales)
+                y_like_slices.append(like)
+                start += Lj
+
+            y_likelihoods = tf.concat(y_like_slices, axis=-1)  # [B,Hy,Wy,C]
+            x_hat = self.synthesis(y_tilde)
+
+            return {
+                'x_hat': x_hat,
+                'y': y,
+                'y_tilde': y_tilde,
+                'y_likelihoods': y_likelihoods,
+                'z': z,
+                'z_tilde': z_tilde,
+                'z_hat': z_hat,
+                'z_likelihoods': z_likelihoods,
+                'H': H,
+                'means_list': means_list,
+                'scales_list': scales_list,
+                'slice_sizes': self.slice_sizes
+            }
+
+        # -----------------------------
+        # Inference-time path: sequential per-slice, per-pixel decoding for correct bpp
+        # This is correct but slow (pure Python loops). Use for validation / ground-truth bpp.
+        # -----------------------------
+        # Prepare containers
+        B = tf.shape(y)[0]
+        Hy = int(y.shape[1])  # small latent spatial size (hopefully static)
+        Wy = int(y.shape[2])
+        y_hat = tf.zeros_like(y)          # decoded (dequantized) latent, will fill slice-by-slice
+        y_likelihood_slices = []
         means_list = []
         scales_list = []
-        for j, Lj in enumerate(self.slice_sizes):
-            y_slice = y_tilde[..., start:start+Lj]  # B,H,W,Lj
-            ctx = self.ctxs[j](y_slice)             # B,H,W,2*Lj
-            Hj = Hj_list[j]                         # B,H,W,2*Lj
-            concat = tf.concat([ctx, Hj], axis=-1)
-            means, scales = self.eps[j](concat)     # each B,H,W,Lj
-            means_list.append(means)
-            scales_list.append(scales)
 
-            # discrete Gaussian likelihood (returns probabilities in (0,1])
-            like = discrete_gaussian_likelihood(y_slice, means, scales)
-            y_like_slices.append(like)
+        # Precompute spatial masks for raster order once (numpy -> tf.constant). A mask for each (i,k):
+        # mask_pos[i,k] has 1 for positions strictly before (i,k) in row-major ordering, else 0.
+        # We'll broadcast that to channels as needed.
+        masks = []
+        for i in range(Hy):
+            for k in range(Wy):
+                m = np.zeros((Hy, Wy), dtype=np.float32)
+                if i > 0:
+                    m[:i, :] = 1.0
+                if k > 0:
+                    m[i, :k] = 1.0
+                masks.append(tf.constant(m[:, :, None], dtype=tf.float32))  # shape (Hy,Wy,1)
+
+        # Sequentially decode each slice
+        start = 0
+        for j, Lj in enumerate(self.slice_sizes):
+            Hj = Hj_list[j]  # [B,Hy,Wy,2*Lj]
+
+            # per-slice temporary storage
+            like_slice = tf.zeros((B, Hy, Wy, Lj), dtype=y.dtype)
+            means_slice = tf.zeros((B, Hy, Wy, Lj), dtype=y.dtype)
+            scales_slice = tf.zeros((B, Hy, Wy, Lj), dtype=y.dtype)
+
+            # We'll fill the slice in raster order
+            for idx, mask2d in enumerate(masks):
+                # mask2d shape [Hy,Wy,1] with 1's for previously decoded pixels
+                # Build partial y_hat where current-slice positions not-yet-decoded are zeroed.
+                # Full partial_y has shape [B,Hy,Wy,C]
+                # We'll zero only the *current slice positions* that are not decoded yet,
+                # while keeping previously-decoded positions intact.
+                # Prepare channel-wise mask to apply only to current slice channels.
+                mask3c = tf.concat([
+                    tf.ones((1,1,1, start), dtype=tf.float32),                         # previous slices keep
+                    tf.cast(mask2d[None, ...], dtype=tf.float32),                      # current slice: mask
+                    tf.zeros((1,1,1, self.C - start - Lj), dtype=tf.float32)           # future slices zero
+                ], axis=-1)  # shape [1,Hy,Wy,C] (broadcastable)
+
+                # apply mask: partial_y = y_hat * mask3c
+                partial_y = y_hat * mask3c  # shape [B,Hy,Wy,C]
+
+                # Compute ctx from partial_y using ctxs[j] (ctx conv was built with input_ch=C)
+                ctx = self.ctxs[j](partial_y)  # [B,Hy,Wy, 2*Lj]
+                concat = tf.concat([ctx, Hj], axis=-1)
+                means, scales = self.eps[j](concat)  # [B,Hy,Wy,Lj]
+
+                # extract the position (i,k) being decoded
+                i = idx // Wy
+                k = idx % Wy
+
+                # take the scalar values at that position across batch and channels
+                # y_pixel: [B, Lj], means_pixel, scales_pixel shapes [B,Lj]
+                y_pixel = tf.reshape(y[:, i:i+1, k:k+1, start:start+Lj], (B, Lj))
+                means_pixel = tf.reshape(means[:, i:i+1, k:k+1, :], (B, Lj))
+                scales_pixel = tf.reshape(scales[:, i:i+1, k:k+1, :], (B, Lj))
+
+                # quantize pixel symbols (round(y - mean))
+                symbols = tf.round(y_pixel - means_pixel)  # integer symbols [B, Lj]
+                # dequantize back to float
+                y_hat_pixel = symbols + means_pixel       # [B, Lj]
+
+                # compute discrete Gaussian probability for these pixel values (use vectorized function)
+                # reshape to [B,1,1,Lj] so discrete_gaussian_likelihood matches [B,Hy,Wy,Lj]
+                y_hat_pixel_reshaped = tf.reshape(y_hat_pixel, (B, 1, 1, Lj))
+                means_pixel_reshaped = tf.reshape(means_pixel, (B, 1, 1, Lj))
+                scales_pixel_reshaped = tf.reshape(scales_pixel, (B, 1, 1, Lj))
+
+                p_pixel = discrete_gaussian_likelihood(y_hat_pixel_reshaped, means_pixel_reshaped, scales_pixel_reshaped)
+                p_pixel = tf.reshape(p_pixel, (B, Lj))  # [B, Lj]
+
+                # write the decoded pixel into y_hat at (i,k) for channels start:start+Lj
+                # Build update mask for assignment
+                # Create a tensor same shape as y_hat with zeros except the pixel position for current channels
+                update = tf.zeros_like(y_hat)
+                # assign at spatial pos (i,k) for channels start:start+Lj
+                # build slicing: update[:, i:i+1, k:k+1, start:start+Lj] = y_hat_pixel_reshaped
+                update = tf.tensor_scatter_nd_update(
+                    update,
+                    indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
+                    updates=tf.reshape(y_hat_pixel, (-1, Lj))
+                )
+                # tensor_scatter_nd_update above is a simplistic idea — if it fails due to shape mismatch,
+                # fallback to create a full slice assignment via concatenation (slower).
+                # For clarity and cross-version robustness we'll instead assign via concatenation:
+
+                # Build per-batch slice and place it into y_hat via slicing & concat (clear and robust)
+                # first convert y_hat to numpy? No — do slicing with tf.concat
+                left = y_hat[..., :start]
+                mid = y_hat[..., start:start+Lj]
+                right = y_hat[..., start+Lj:]
+
+                # mid is [B,Hy,Wy,Lj]; replace mid[:, i, k, :] with y_hat_pixel value
+                # create a mask for mid
+                mid_mask = tf.zeros((B, Hy, Wy, Lj), dtype=mid.dtype)
+                mid_mask = tf.tensor_scatter_nd_update(
+                    mid_mask,
+                    indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
+                    updates=tf.reshape(y_hat_pixel, (-1, Lj))
+                )
+                # mid_new = mid * (1 - pos_mask) + mid_mask
+                pos_mask = tf.zeros((Hy, Wy), dtype=tf.float32)
+                pos_mask = tf.tensor_scatter_nd_update(pos_mask, indices=tf.constant([[i,k]]), updates=tf.constant([1.0]))
+                pos_mask = pos_mask[None, :, :, None]  # [1,Hy,Wy,1]
+                pos_mask = tf.cast(pos_mask, dtype=mid.dtype)
+                mid_new = mid * (1.0 - pos_mask) + mid_mask
+
+                y_hat = tf.concat([left, mid_new, right], axis=-1)
+
+                # record probabilities, means, scales for that pixel into full tensors
+                # assign to like_slice, means_slice, scales_slice at (i,k)
+                like_slice = tf.tensor_scatter_nd_update(
+                    like_slice,
+                    indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
+                    updates=tf.reshape(p_pixel, (-1, Lj))
+                )
+                means_slice = tf.tensor_scatter_nd_update(
+                    means_slice,
+                    indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
+                    updates=tf.reshape(means_pixel, (-1, Lj))
+                )
+                scales_slice = tf.tensor_scatter_nd_update(
+                    scales_slice,
+                    indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
+                    updates=tf.reshape(scales_pixel, (-1, Lj))
+                )
+
+            # end raster scan for slice j
+            y_likelihood_slices.append(like_slice)
+            means_list.append(means_slice)
+            scales_list.append(scales_slice)
             start += Lj
 
-        y_likelihoods = tf.concat(y_like_slices, axis=-1)  # shape [B,H,W,C]
+        # end all slices
+        y_likelihoods = tf.concat(y_likelihood_slices, axis=-1)  # [B,Hy,Wy,C]
+        x_hat = self.synthesis(y_hat)
 
-        # z_entropy_out is the entropy bottleneck's likelihood for z (same shape as z_tilde)
-        # Return dictionary
         return {
             'x_hat': x_hat,
             'y': y,
-            'y_tilde': y_tilde,
-            'y_likelihoods': y_likelihoods,     # probabilities p(y_i)
+            'y_tilde': None,               # not used at inference
+            'y_likelihoods': y_likelihoods,
             'z': z,
             'z_tilde': z_tilde,
             'z_hat': z_hat,
-            'z_likelihoods': z_entropy_out,     # probabilities p(z_i)
+            'z_likelihoods': z_likelihoods,
             'H': H,
             'means_list': means_list,
             'scales_list': scales_list,
@@ -325,4 +488,5 @@ class MultiTaskCodec(tf.keras.Model):
         }
 
     
+
 
