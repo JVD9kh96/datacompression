@@ -286,7 +286,7 @@ class MultiTaskCodec(tf.keras.Model):
         # -----------------------------
         # Training-time path (fast, surrogate)
         # -----------------------------
-        if training:
+        if True:
             # Use y_tilde for ctx computation and likelihoods exactly as in training loop.
             start = 0
             y_like_slices = []
@@ -324,169 +324,170 @@ class MultiTaskCodec(tf.keras.Model):
                 'slice_sizes': self.slice_sizes
             }
 
-        # -----------------------------
-        # Inference-time path: sequential per-slice, per-pixel decoding for correct bpp
-        # This is correct but slow (pure Python loops). Use for validation / ground-truth bpp.
-        # -----------------------------
-        # Prepare containers
-        B = tf.shape(y)[0]
-        Hy = int(y.shape[1])  # small latent spatial size (hopefully static)
-        Wy = int(y.shape[2])
-        y_hat = tf.zeros_like(y)          # decoded (dequantized) latent, will fill slice-by-slice
-        y_likelihood_slices = []
-        means_list = []
-        scales_list = []
+        # # -----------------------------
+        # # Inference-time path: sequential per-slice, per-pixel decoding for correct bpp
+        # # This is correct but slow (pure Python loops). Use for validation / ground-truth bpp.
+        # # -----------------------------
+        # # Prepare containers
+        # B = tf.shape(y)[0]
+        # Hy = int(y.shape[1])  # small latent spatial size (hopefully static)
+        # Wy = int(y.shape[2])
+        # y_hat = tf.zeros_like(y)          # decoded (dequantized) latent, will fill slice-by-slice
+        # y_likelihood_slices = []
+        # means_list = []
+        # scales_list = []
 
-        # Precompute spatial masks for raster order once (numpy -> tf.constant). A mask for each (i,k):
-        # mask_pos[i,k] has 1 for positions strictly before (i,k) in row-major ordering, else 0.
-        # We'll broadcast that to channels as needed.
-        masks = []
-        for i in range(Hy):
-            for k in range(Wy):
-                m = np.zeros((Hy, Wy), dtype=np.float32)
-                if i > 0:
-                    m[:i, :] = 1.0
-                if k > 0:
-                    m[i, :k] = 1.0
-                masks.append(tf.constant(m[:, :, None], dtype=tf.float32))  # shape (Hy,Wy,1)
+        # # Precompute spatial masks for raster order once (numpy -> tf.constant). A mask for each (i,k):
+        # # mask_pos[i,k] has 1 for positions strictly before (i,k) in row-major ordering, else 0.
+        # # We'll broadcast that to channels as needed.
+        # masks = []
+        # for i in range(Hy):
+        #     for k in range(Wy):
+        #         m = np.zeros((Hy, Wy), dtype=np.float32)
+        #         if i > 0:
+        #             m[:i, :] = 1.0
+        #         if k > 0:
+        #             m[i, :k] = 1.0
+        #         masks.append(tf.constant(m[:, :, None], dtype=tf.float32))  # shape (Hy,Wy,1)
 
-        # Sequentially decode each slice
-        start = 0
-        for j, Lj in enumerate(self.slice_sizes):
-            Hj = Hj_list[j]  # [B,Hy,Wy,2*Lj]
+        # # Sequentially decode each slice
+        # start = 0
+        # for j, Lj in enumerate(self.slice_sizes):
+        #     Hj = Hj_list[j]  # [B,Hy,Wy,2*Lj]
 
-            # per-slice temporary storage
-            like_slice = tf.zeros((B, Hy, Wy, Lj), dtype=y.dtype)
-            means_slice = tf.zeros((B, Hy, Wy, Lj), dtype=y.dtype)
-            scales_slice = tf.zeros((B, Hy, Wy, Lj), dtype=y.dtype)
+        #     # per-slice temporary storage
+        #     like_slice = tf.zeros((B, Hy, Wy, Lj), dtype=y.dtype)
+        #     means_slice = tf.zeros((B, Hy, Wy, Lj), dtype=y.dtype)
+        #     scales_slice = tf.zeros((B, Hy, Wy, Lj), dtype=y.dtype)
 
-            # We'll fill the slice in raster order
-            for idx, mask2d in enumerate(masks):
-                # mask2d shape [Hy,Wy,1] with 1's for previously decoded pixels
-                # Build partial y_hat where current-slice positions not-yet-decoded are zeroed.
-                # Full partial_y has shape [B,Hy,Wy,C]
-                # We'll zero only the *current slice positions* that are not decoded yet,
-                # while keeping previously-decoded positions intact.
-                # Prepare channel-wise mask to apply only to current slice channels.
-                mask3c = tf.concat([
-                    tf.ones((1,1,1, start), dtype=tf.float32),                         # previous slices keep
-                    tf.cast(mask2d[None, ...], dtype=tf.float32),                      # current slice: mask
-                    tf.zeros((1,1,1, self.C - start - Lj), dtype=tf.float32)           # future slices zero
-                ], axis=-1)  # shape [1,Hy,Wy,C] (broadcastable)
+        #     # We'll fill the slice in raster order
+        #     for idx, mask2d in enumerate(masks):
+        #         # mask2d shape [Hy,Wy,1] with 1's for previously decoded pixels
+        #         # Build partial y_hat where current-slice positions not-yet-decoded are zeroed.
+        #         # Full partial_y has shape [B,Hy,Wy,C]
+        #         # We'll zero only the *current slice positions* that are not decoded yet,
+        #         # while keeping previously-decoded positions intact.
+        #         # Prepare channel-wise mask to apply only to current slice channels.
+        #         mask3c = tf.concat([
+        #             tf.ones((1,1,1, start), dtype=tf.float32),                         # previous slices keep
+        #             tf.cast(mask2d[None, ...], dtype=tf.float32),                      # current slice: mask
+        #             tf.zeros((1,1,1, self.C - start - Lj), dtype=tf.float32)           # future slices zero
+        #         ], axis=-1)  # shape [1,Hy,Wy,C] (broadcastable)
 
-                # apply mask: partial_y = y_hat * mask3c
-                partial_y = y_hat * mask3c  # shape [B,Hy,Wy,C]
+        #         # apply mask: partial_y = y_hat * mask3c
+        #         partial_y = y_hat * mask3c  # shape [B,Hy,Wy,C]
 
-                # Compute ctx from partial_y using ctxs[j] (ctx conv was built with input_ch=C)
-                ctx = self.ctxs[j](partial_y)  # [B,Hy,Wy, 2*Lj]
-                concat = tf.concat([ctx, Hj], axis=-1)
-                means, scales = self.eps[j](concat)  # [B,Hy,Wy,Lj]
+        #         # Compute ctx from partial_y using ctxs[j] (ctx conv was built with input_ch=C)
+        #         ctx = self.ctxs[j](partial_y)  # [B,Hy,Wy, 2*Lj]
+        #         concat = tf.concat([ctx, Hj], axis=-1)
+        #         means, scales = self.eps[j](concat)  # [B,Hy,Wy,Lj]
 
-                # extract the position (i,k) being decoded
-                i = idx // Wy
-                k = idx % Wy
+        #         # extract the position (i,k) being decoded
+        #         i = idx // Wy
+        #         k = idx % Wy
 
-                # take the scalar values at that position across batch and channels
-                # y_pixel: [B, Lj], means_pixel, scales_pixel shapes [B,Lj]
-                y_pixel = tf.reshape(y[:, i:i+1, k:k+1, start:start+Lj], (B, Lj))
-                means_pixel = tf.reshape(means[:, i:i+1, k:k+1, :], (B, Lj))
-                scales_pixel = tf.reshape(scales[:, i:i+1, k:k+1, :], (B, Lj))
+        #         # take the scalar values at that position across batch and channels
+        #         # y_pixel: [B, Lj], means_pixel, scales_pixel shapes [B,Lj]
+        #         y_pixel = tf.reshape(y[:, i:i+1, k:k+1, start:start+Lj], (B, Lj))
+        #         means_pixel = tf.reshape(means[:, i:i+1, k:k+1, :], (B, Lj))
+        #         scales_pixel = tf.reshape(scales[:, i:i+1, k:k+1, :], (B, Lj))
 
-                # quantize pixel symbols (round(y - mean))
-                symbols = tf.round(y_pixel - means_pixel)  # integer symbols [B, Lj]
-                # dequantize back to float
-                y_hat_pixel = symbols + means_pixel       # [B, Lj]
+        #         # quantize pixel symbols (round(y - mean))
+        #         symbols = tf.round(y_pixel - means_pixel)  # integer symbols [B, Lj]
+        #         # dequantize back to float
+        #         y_hat_pixel = symbols + means_pixel       # [B, Lj]
 
-                # compute discrete Gaussian probability for these pixel values (use vectorized function)
-                # reshape to [B,1,1,Lj] so discrete_gaussian_likelihood matches [B,Hy,Wy,Lj]
-                y_hat_pixel_reshaped = tf.reshape(y_hat_pixel, (B, 1, 1, Lj))
-                means_pixel_reshaped = tf.reshape(means_pixel, (B, 1, 1, Lj))
-                scales_pixel_reshaped = tf.reshape(scales_pixel, (B, 1, 1, Lj))
+        #         # compute discrete Gaussian probability for these pixel values (use vectorized function)
+        #         # reshape to [B,1,1,Lj] so discrete_gaussian_likelihood matches [B,Hy,Wy,Lj]
+        #         y_hat_pixel_reshaped = tf.reshape(y_hat_pixel, (B, 1, 1, Lj))
+        #         means_pixel_reshaped = tf.reshape(means_pixel, (B, 1, 1, Lj))
+        #         scales_pixel_reshaped = tf.reshape(scales_pixel, (B, 1, 1, Lj))
 
-                p_pixel = discrete_gaussian_likelihood(y_hat_pixel_reshaped, means_pixel_reshaped, scales_pixel_reshaped)
-                p_pixel = tf.reshape(p_pixel, (B, Lj))  # [B, Lj]
+        #         p_pixel = discrete_gaussian_likelihood(y_hat_pixel_reshaped, means_pixel_reshaped, scales_pixel_reshaped)
+        #         p_pixel = tf.reshape(p_pixel, (B, Lj))  # [B, Lj]
 
-                # write the decoded pixel into y_hat at (i,k) for channels start:start+Lj
-                # Build update mask for assignment
-                # Create a tensor same shape as y_hat with zeros except the pixel position for current channels
-                update = tf.zeros_like(y_hat)
-                # assign at spatial pos (i,k) for channels start:start+Lj
-                # build slicing: update[:, i:i+1, k:k+1, start:start+Lj] = y_hat_pixel_reshaped
-                update = tf.tensor_scatter_nd_update(
-                    update,
-                    indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
-                    updates=tf.reshape(y_hat_pixel, (-1, Lj))
-                )
-                # tensor_scatter_nd_update above is a simplistic idea — if it fails due to shape mismatch,
-                # fallback to create a full slice assignment via concatenation (slower).
-                # For clarity and cross-version robustness we'll instead assign via concatenation:
+        #         # write the decoded pixel into y_hat at (i,k) for channels start:start+Lj
+        #         # Build update mask for assignment
+        #         # Create a tensor same shape as y_hat with zeros except the pixel position for current channels
+        #         update = tf.zeros_like(y_hat)
+        #         # assign at spatial pos (i,k) for channels start:start+Lj
+        #         # build slicing: update[:, i:i+1, k:k+1, start:start+Lj] = y_hat_pixel_reshaped
+        #         update = tf.tensor_scatter_nd_update(
+        #             update,
+        #             indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
+        #             updates=tf.reshape(y_hat_pixel, (-1, Lj))
+        #         )
+        #         # tensor_scatter_nd_update above is a simplistic idea — if it fails due to shape mismatch,
+        #         # fallback to create a full slice assignment via concatenation (slower).
+        #         # For clarity and cross-version robustness we'll instead assign via concatenation:
 
-                # Build per-batch slice and place it into y_hat via slicing & concat (clear and robust)
-                # first convert y_hat to numpy? No — do slicing with tf.concat
-                left = y_hat[..., :start]
-                mid = y_hat[..., start:start+Lj]
-                right = y_hat[..., start+Lj:]
+        #         # Build per-batch slice and place it into y_hat via slicing & concat (clear and robust)
+        #         # first convert y_hat to numpy? No — do slicing with tf.concat
+        #         left = y_hat[..., :start]
+        #         mid = y_hat[..., start:start+Lj]
+        #         right = y_hat[..., start+Lj:]
 
-                # mid is [B,Hy,Wy,Lj]; replace mid[:, i, k, :] with y_hat_pixel value
-                # create a mask for mid
-                mid_mask = tf.zeros((B, Hy, Wy, Lj), dtype=mid.dtype)
-                mid_mask = tf.tensor_scatter_nd_update(
-                    mid_mask,
-                    indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
-                    updates=tf.reshape(y_hat_pixel, (-1, Lj))
-                )
-                # mid_new = mid * (1 - pos_mask) + mid_mask
-                pos_mask = tf.zeros((Hy, Wy), dtype=tf.float32)
-                pos_mask = tf.tensor_scatter_nd_update(pos_mask, indices=tf.constant([[i,k]]), updates=tf.constant([1.0]))
-                pos_mask = pos_mask[None, :, :, None]  # [1,Hy,Wy,1]
-                pos_mask = tf.cast(pos_mask, dtype=mid.dtype)
-                mid_new = mid * (1.0 - pos_mask) + mid_mask
+        #         # mid is [B,Hy,Wy,Lj]; replace mid[:, i, k, :] with y_hat_pixel value
+        #         # create a mask for mid
+        #         mid_mask = tf.zeros((B, Hy, Wy, Lj), dtype=mid.dtype)
+        #         mid_mask = tf.tensor_scatter_nd_update(
+        #             mid_mask,
+        #             indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
+        #             updates=tf.reshape(y_hat_pixel, (-1, Lj))
+        #         )
+        #         # mid_new = mid * (1 - pos_mask) + mid_mask
+        #         pos_mask = tf.zeros((Hy, Wy), dtype=tf.float32)
+        #         pos_mask = tf.tensor_scatter_nd_update(pos_mask, indices=tf.constant([[i,k]]), updates=tf.constant([1.0]))
+        #         pos_mask = pos_mask[None, :, :, None]  # [1,Hy,Wy,1]
+        #         pos_mask = tf.cast(pos_mask, dtype=mid.dtype)
+        #         mid_new = mid * (1.0 - pos_mask) + mid_mask
 
-                y_hat = tf.concat([left, mid_new, right], axis=-1)
+        #         y_hat = tf.concat([left, mid_new, right], axis=-1)
 
-                # record probabilities, means, scales for that pixel into full tensors
-                # assign to like_slice, means_slice, scales_slice at (i,k)
-                like_slice = tf.tensor_scatter_nd_update(
-                    like_slice,
-                    indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
-                    updates=tf.reshape(p_pixel, (-1, Lj))
-                )
-                means_slice = tf.tensor_scatter_nd_update(
-                    means_slice,
-                    indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
-                    updates=tf.reshape(means_pixel, (-1, Lj))
-                )
-                scales_slice = tf.tensor_scatter_nd_update(
-                    scales_slice,
-                    indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
-                    updates=tf.reshape(scales_pixel, (-1, Lj))
-                )
+        #         # record probabilities, means, scales for that pixel into full tensors
+        #         # assign to like_slice, means_slice, scales_slice at (i,k)
+        #         like_slice = tf.tensor_scatter_nd_update(
+        #             like_slice,
+        #             indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
+        #             updates=tf.reshape(p_pixel, (-1, Lj))
+        #         )
+        #         means_slice = tf.tensor_scatter_nd_update(
+        #             means_slice,
+        #             indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
+        #             updates=tf.reshape(means_pixel, (-1, Lj))
+        #         )
+        #         scales_slice = tf.tensor_scatter_nd_update(
+        #             scales_slice,
+        #             indices=tf.constant([[b, i, k, 0] for b in range(int(B))], dtype=tf.int32),
+        #             updates=tf.reshape(scales_pixel, (-1, Lj))
+        #         )
 
-            # end raster scan for slice j
-            y_likelihood_slices.append(like_slice)
-            means_list.append(means_slice)
-            scales_list.append(scales_slice)
-            start += Lj
+        #     # end raster scan for slice j
+        #     y_likelihood_slices.append(like_slice)
+        #     means_list.append(means_slice)
+        #     scales_list.append(scales_slice)
+        #     start += Lj
 
-        # end all slices
-        y_likelihoods = tf.concat(y_likelihood_slices, axis=-1)  # [B,Hy,Wy,C]
-        x_hat = self.synthesis(y_hat)
+        # # end all slices
+        # y_likelihoods = tf.concat(y_likelihood_slices, axis=-1)  # [B,Hy,Wy,C]
+        # x_hat = self.synthesis(y_hat)
 
-        return {
-            'x_hat': x_hat,
-            'y': y,
-            'y_tilde': None,               # not used at inference
-            'y_likelihoods': y_likelihoods,
-            'z': z,
-            'z_tilde': z_tilde,
-            'z_hat': z_hat,
-            'z_likelihoods': z_likelihoods,
-            'H': H,
-            'means_list': means_list,
-            'scales_list': scales_list,
-            'slice_sizes': self.slice_sizes
-        }
+        # return {
+        #     'x_hat': x_hat,
+        #     'y': y,
+        #     'y_tilde': None,               # not used at inference
+        #     'y_likelihoods': y_likelihoods,
+        #     'z': z,
+        #     'z_tilde': z_tilde,
+        #     'z_hat': z_hat,
+        #     'z_likelihoods': z_likelihoods,
+        #     'H': H,
+        #     'means_list': means_list,
+        #     'scales_list': scales_list,
+        #     'slice_sizes': self.slice_sizes
+        # }
 
     
+
 
 
