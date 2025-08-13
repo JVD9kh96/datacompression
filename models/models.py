@@ -307,7 +307,7 @@ class MultiTaskCodec(Model):
             bits = tf.cond(tf.less_equal(maxv, 1.0), probs_to_bits, values_are_bits)
             return bits
 
-        z_bits_per_batch_or_per_image = entropy_output_to_bits_tensor(z_entropy_out)
+        z_bits_per_batch_or_per_image = tf.stop_gradient(entropy_output_to_bits_tensor(z_entropy_out))
         # If you want total bits for the batch:
         if tf.rank(z_bits_per_batch_or_per_image) == 0:
             z_bits_total = z_bits_per_batch_or_per_image
@@ -321,5 +321,6 @@ class MultiTaskCodec(Model):
             'z': z, 'z_tilde': z_tilde, 'H': H,
             'y_likelihoods': y_likelihoods, 'z_entropy_out': z_entropy_out,
             'z_bits_total': z_bits_total,
-            'slice_sizes': self.slice_sizes
+            'slice_sizes': self.slice_sizes,
+            'z_bits_per_batch_or_per_image':z_bits_per_batch_or_per_image,
         }
